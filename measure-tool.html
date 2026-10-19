@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Image Measurement Tool</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{--bg:#f3f5f6;--panel:#fff;--ink:#16252b;--mute:#5d6f76;--line:#d5dde0;--accent:#0b6e7f;--warn:#b3261e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Segoe UI",system-ui,sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:16px}
+h1{font-size:1.35rem;margin:0 0 2px}
+h2{font-size:1rem;margin:0 0 8px}
+.sub{color:var(--mute);margin:0 0 14px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px;margin-bottom:12px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+button,select,input{font:inherit}
+button{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:6px 12px;cursor:pointer;color:var(--ink)}
+button:hover{border-color:var(--accent)}
+button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+input[type=number],input[type=text],select{border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:90px}
+select{width:auto}
+#stage{background:#10181b;border-radius:4px;overflow:auto;max-height:70vh;text-align:center}
+canvas#cv{max-width:100%;cursor:crosshair;display:block;margin:0 auto}
+#hint{color:var(--mute);margin:8px 0 0;min-height:1.5em}
+#scaleInfo{font-weight:600}
+table{border-collapse:collapse;width:100%}
+th,td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left}
+td button{padding:1px 8px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:800px){.grid{grid-template-columns:1fr}}
+.tablebox{max-height:260px;overflow:auto}
+.stats{color:var(--mute);margin-top:8px}
+.err{color:var(--warn)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Image Measurement Tool</h1>
+<p class="sub">Open a microscope image, set the scale, measure, and export your results. Images stay on your device.</p>
+
+<div class="panel">
+  <h2>1. Open an image</h2>
+  <input type="file" id="file" accept="image/*">
+</div>
+
+<div class="panel">
+  <h2>2. Set the scale</h2>
+  <div class="row">
+    <label>Known length <input type="number" id="known" min="0" step="any" value="100"></label>
+    <label>Unit <input type="text" id="unit" value="µm"></label>
+    <button id="bCal">Draw scale line</button>
+    <span id="scaleInfo">Scale not set (measuring in pixels)</span>
+  </div>
+  <p class="sub" style="margin:8px 0 0">Click the two ends of a scale bar in your image, after entering its real length above.</p>
+</div>
+
+<div class="panel">
+  <h2>3. Measure</h2>
+  <div class="row">
+    <button id="bLen">Length</button>
+    <button id="bArea">Area</button>
+    <button id="bFinish">Finish area</button>
+    <button id="bUndo">Undo last point</button>
+    <button id="bCancel">Cancel</button>
+  </div>
+  <p id="hint">Open an image to begin.</p>
+  <div id="stage"><canvas id="cv" width="800" height="500"></canvas></div>
+</div>
+
+<div class="grid">
+  <div class="panel">
+    <h2>Results</h2>
+    <div class="tablebox">
+      <table><thead><tr><th>#</th><th>Type</th><th>Value</th><th>Unit</th><th></th></tr></thead>
+      <tbody id="rows"><tr><td colspan="5">No measurements yet.</td></tr></tbody></table>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="row" style="margin-top:8px">
+      <button id="bCsv">Download CSV</button>
+      <button id="bCopy">Copy results</button>
+      <button id="bClear">Clear all</button>
+    </div>
+    <p id="msg" class="sub" style="margin:6px 0 0"></p>
+  </div>
+  <div class="panel">
+    <h2>Chart</h2>
+    <div class="row">
+      <label>Data <select id="cData"><option value="Length">Lengths</option><option value="Area">Areas</option></select></label>
+      <label>Chart <select id="cType"><option value="bar">Bar (each measurement)</option><option value="hist">Histogram</option></select></label>
+      <label>Bins <input type="number" id="bins" min="2" max="40" value="8"></label>
+    </div>
+    <div style="position:relative;height:260px;margin-top:8px"><canvas id="chart"></canvas></div>
+    <div class="row" style="margin-top:8px"><button id="bPng">Download chart image</button></div>
+  </div>
+</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+let img = null, scale = 0, unit = 'px', mode = null, pts = [], items = [], chart = null;
+
+function setMode(m){
+  mode = m; pts = [];
+  ['bCal','bLen','bArea'].forEach(b => $(b).classList.remove('on'));
+  if(m==='cal') $('bCal').classList.add('on');
+  if(m==='len') $('bLen').classList.add('on');
+  if(m==='area') $('bArea').classList.add('on');
+  const h = {cal:'Click the two ends of the scale bar.', len:'Click the start and end of the object.',
+    area:'Click around the edge of the object, then press Finish area (or double-click).'};
+  $('hint').textContent = img ? (h[m] || 'Choose a tool to continue.') : 'Open an image to begin.';
+  draw();
+}
+
+$('file').onchange = e => {
+  const f = e.target.files[0]; if(!f) return;
+  const url = URL.createObjectURL(f), im = new Image();
+  im.onload = () => { img = im; cv.width = im.naturalWidth; cv.height = im.naturalHeight;
+    scale = 0; unit = 'px'; items = []; $('scaleInfo').textContent = 'Scale not set (measuring in pixels)';
+    setMode(null); refresh(); URL.revokeObjectURL(url); };
+  im.onerror = () => { $('hint').textContent = 'That file could not be opened as an image.'; };
+  im.src = url;
+};
+
+function pos(e){
+  const r = cv.getBoundingClientRect();
+  return {x:(e.clientX-r.left)*cv.width/r.width, y:(e.clientY-r.top)*cv.height/r.height};
+}
+const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
+function area(p){ let s=0; for(let i=0;i<p.length;i++){const a=p[i],b=p[(i+1)%p.length]; s+=a.x*b.y-b.x*a.y;} return Math.abs(s)/2; }
+const u = () => scale ? $('unit').value || 'units' : 'px';
+
+cv.onclick = e => {
+  if(!img || !mode) return;
+  pts.push(pos(e));
+  if(mode==='cal' && pts.length===2){
+    const k = parseFloat($('known').value);
+    if(!(k>0)){ $('hint').innerHTML = '<span class="err">Enter a known length greater than 0.</span>'; pts=[]; draw(); return; }
+    scale = dist(pts[0],pts[1]) / k; unit = $('unit').value || 'units';
+    $('scaleInfo').textContent = 'Scale: ' + scale.toFixed(3) + ' px per ' + unit;
+    items.forEach(it => it.v = convert(it)); refresh(); setMode(null); return;
+  }
+  if(mode==='len' && pts.length===2){
+    add({type:'Length', raw:dist(pts[0],pts[1]), pts:pts.slice()}); pts = [];
+  }
+  draw();
+};
+cv.ondblclick = () => { if(mode==='area') finishArea(); };
+function finishArea(){
+  if(mode!=='area' || pts.length<3){ $('hint').textContent = 'Area needs at least 3 points.'; return; }
+  add({type:'Area', raw:area(pts), pts:pts.slice()}); pts = []; draw();
+}
+function convert(it){ return scale ? (it.type==='Area' ? it.raw/(scale*scale) : it.raw/scale) : it.raw; }
+function add(it){ it.v = convert(it); items.push(it); refresh(); }
+
+function draw(){
+  ctx.clearRect(0,0,cv.width,cv.height);
+  if(img) ctx.drawImage(img,0,0);
+  const lw = Math.max(2, cv.width/500);
+  const shape = (p, close, col) => {
+    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = lw;
+    ctx.beginPath(); p.forEach((q,i) => i ? ctx.lineTo(q.x,q.y) : ctx.moveTo(q.x,q.y));
+    if(close) ctx.closePath(); ctx.stroke();
+    p.forEach(q => { ctx.beginPath(); ctx.arc(q.x,q.y,lw*1.6,0,7); ctx.fill(); });
+  };
+  items.forEach((it,i) => {
+    shape(it.pts, it.type==='Area', it.type==='Area' ? '#ffd23f' : '#3ee6c1');
+    ctx.fillStyle = '#fff'; ctx.font = (lw*7)+'px sans-serif';
+    ctx.fillText(i+1, it.pts[0].x + lw*3, it.pts[0].y - lw*3);
+  });
+  if(pts.length) shape(pts, false, mode==='cal' ? '#ff5d73' : '#ffffff');
+}
+
+function fmt(n){ return n>=100 ? n.toFixed(1) : n.toFixed(3); }
+function refresh(){
+  const tb = $('rows');
+  tb.innerHTML = items.length ? '' : '<tr><td colspan="5">No measurements yet.</td></tr>';
+  items.forEach((it,i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td>'+(i+1)+'</td><td>'+it.type+'</td><td>'+fmt(it.v)+'</td><td>'+
+      (it.type==='Area' ? u()+'²' : u())+'</td><td><button aria-label="Delete">×</button></td>';
+    tr.querySelector('button').onclick = () => { items.splice(i,1); refresh(); };
+    tb.appendChild(tr);
+  });
+  stats(); drawChart(); draw();
+}
+function stats(){
+  const out = [];
+  ['Length','Area'].forEach(t => {
+    const v = items.filter(i => i.type===t).map(i => i.v);
+    if(!v.length) return;
+    const m = v.reduce((a,b)=>a+b,0)/v.length;
+    const sd = v.length>1 ? Math.sqrt(v.reduce((a,b)=>a+(b-m)**2,0)/(v.length-1)) : 0;
+    out.push(t+'s: n='+v.length+', mean '+fmt(m)+', SD '+fmt(sd)+', min '+fmt(Math.min(...v))+', max '+fmt(Math.max(...v)));
+  });
+  $('stats').innerHTML = out.join('<br>');
+}
+
+function drawChart(){
+  const t = $('cData').value, v = items.filter(i => i.type===t).map(i => i.v);
+  const lab = t + ' (' + (t==='Area' ? u()+'²' : u()) + ')';
+  let labels, data, ylab;
+  if($('cType').value==='bar'){
+    labels = v.map((_,i) => '#'+(i+1)); data = v; ylab = lab;
+  } else if(v.length){
+    const n = Math.min(40, Math.max(2, parseInt($('bins').value)||8));
+    const lo = Math.min(...v), hi = Math.max(...v), w = (hi-lo)/n || 1;
+    data = new Array(n).fill(0);
+    v.forEach(x => data[Math.min(n-1, Math.floor((x-lo)/w))]++);
+    labels = data.map((_,i) => fmt(lo+i*w)+'–'+fmt(lo+(i+1)*w)); ylab = 'Count';
+  } else { labels = []; data = []; ylab = 'Count'; }
+  if(chart) chart.destroy();
+  chart = new Chart($('chart'), {type:'bar',
+    data:{labels, datasets:[{label:ylab, data, backgroundColor:'#0b6e7f'}]},
+    options:{responsive:true, maintainAspectRatio:false, animation:false,
+      scales:{y:{beginAtZero:true,title:{display:true,text:ylab}},x:{title:{display:true,text:$('cType').value==='bar'?'Measurement':lab}}},
+      plugins:{legend:{display:false}}}});
+}
+['cData','cType','bins'].forEach(id => $(id).onchange = drawChart);
+
+function csv(){
+  let s = 'No,Type,Value,Unit\n';
+  items.forEach((it,i) => s += (i+1)+','+it.type+','+it.v+','+(it.type==='Area' ? u()+'^2' : u())+'\n');
+  return s;
+}
+function msg(t){ $('msg').textContent = t; }
+$('bCsv').onclick = () => {
+  if(!items.length) return msg('No measurements to export yet.');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv()], {type:'text/csv'}));
+  a.download = 'measurements.csv'; a.click();
+  msg('If no download started, use Copy results and paste into Excel or Sheets.');
+};
+$('bCopy').onclick = () => {
+  if(!items.length) return msg('No measurements to copy yet.');
+  const text = csv().replace(/,/g,'\t');
+  (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject())
+    .then(() => msg('Copied. Paste into Excel or Google Sheets.'))
+    .catch(() => msg('Copy was blocked by the browser. Open the tool in its own tab and try again.'));
+};
+$('bPng').onclick = () => {
+  const a = document.createElement('a'); a.href = $('chart').toDataURL('image/png');
+  a.download = 'chart.png'; a.click();
+};
+$('bClear').onclick = () => { items = []; pts = []; refresh(); };
+$('bCal').onclick = () => img && setMode('cal');
+$('bLen').onclick = () => img && setMode('len');
+$('bArea').onclick = () => img && setMode('area');
+$('bFinish').onclick = finishArea;
+$('bUndo').onclick = () => { pts.pop(); draw(); };
+$('bCancel').onclick = () => setMode(null);
+document.addEventListener('keydown', e => { if(e.key==='Escape') setMode(null); });
+refresh();
+</script>
+</body>
+</html>
